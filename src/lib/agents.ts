@@ -1,5 +1,4 @@
 
-import {z} from "zod";
 import {
   AgentLog,
   ClaimInput,
@@ -31,7 +30,9 @@ function normalizeDOB(dob: string): string {
   if (iso) return dob;
   const mdy = dob.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
   if (mdy) {
-    const [_, mm, dd, yyyy] = mdy;
+    const mm = mdy[1];
+    const dd = mdy[2];
+    const yyyy = mdy[3];
     const y = (yyyy.length === 2 ? "19" : "") + yyyy; // naive
     return `${y.padStart(4, "0")}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
   }
@@ -92,6 +93,7 @@ Claim JSON:
 ${JSON.stringify(claim)}
 Return JSON: { "notes": string[] } only.
   `.trim();
+
   let notes: string[] = [];
   try {
     const res = await askGeminiJSON(prompt);
@@ -118,7 +120,7 @@ export async function coderAgent(claim: ClaimInput, logs: AgentLog[]) {
 
   if (!valid) {
     // Find the closest by simple contains
-    const hit = Object.entries(CPT_REF).find(([_, v]) => v.procedures.some((p) => proc.includes(p)));
+    const hit = Object.entries(CPT_REF).find(([, v]) => v.procedures.some((p) => proc.includes(p)));
     suggested = hit?.[0] ?? null;
   } else {
     suggested = claim.cptCode!;
@@ -135,7 +137,9 @@ Return JSON: {"justification": string}
   try {
     const j = await askGeminiJSON(prompt);
     if (typeof j.justification === "string") justification = j.justification;
-  } catch {}
+  } catch {
+    // ignore
+  }
 
   pushLog(logs, {
     agent: "CoderAgent",
@@ -186,18 +190,19 @@ Return JSON: {"rationale": string}
   try {
     const r = await askGeminiJSON(prompt);
     if (typeof r.rationale === "string") rationale = r.rationale;
-  } catch {}
+  } catch {
+    // ignore
+  }
 
   pushLog(logs, { agent: "ReviewerAgent", step: "review", detail: "Assessed denial risk.", data: { risk, rationale } });
   return { denialRisk: risk as "low" | "medium" | "high", rationale };
 }
 
-/** ---------- Human-friendly explanation (new) ---------- */
+/** ---------- Human-friendly explanation ---------- */
 async function humanExplain({
   parsed,
   verifiedIssues,
   suggestedCpt,
-  coderValid,
   submission,
   reviewer,
   metrics,
@@ -205,12 +210,10 @@ async function humanExplain({
   parsed: ClaimInput;
   verifiedIssues: VerificationIssue[];
   suggestedCpt: string | null;
-  coderValid: boolean;
   submission: SubmissionDraft;
   reviewer: { denialRisk: "low" | "medium" | "high"; rationale: string };
   metrics: { timeSavedPercent: number; cleanClaimRate: number };
 }) {
-  // Compact, non-sensitive snapshot
   const mini = {
     patientName: parsed.patientName ? "Present" : "Missing",
     dob: parsed.dob ? "Present" : "Missing",
@@ -241,7 +244,6 @@ ${JSON.stringify(mini)}
     // ignore and fall back
   }
 
-  // Fallback if LLM hiccups
   return [
     "🧾 Read the claim and pulled out key fields.",
     "✅ Checked for missing/incorrect details.",
@@ -273,12 +275,11 @@ export async function runWorkflow(input: unknown) {
   const timeSavedPercent = Math.round((1 - automatedSeconds / baselineSeconds) * 100);
   const cleanClaimRate = submission.status === "READY" ? 98 : 82;
 
-  // NEW: Generate human-readable explanation
+  // Human explanation
   const explanation = await humanExplain({
     parsed,
     verifiedIssues: verified.issues,
     suggestedCpt: coder.suggestedCpt,
-    coderValid: coder.valid,
     submission,
     reviewer,
     metrics: { timeSavedPercent, cleanClaimRate },
@@ -297,7 +298,6 @@ export async function runWorkflow(input: unknown) {
       cleanClaimRate,
     },
     logs,
-    explanation, // <-- include the recap in API response
+    explanation,
   };
 }
-

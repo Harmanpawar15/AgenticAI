@@ -1,9 +1,9 @@
+
 "use client";
 
-
 import { useEffect, useMemo, useState } from "react";
+import type { AgentLog, VerificationIssue, WorkflowResponse } from "@/lib/schemas";
 import { SAMPLE_CLAIMS } from "../data/sampleClaim";
-
 
 /** ---------- Small UI helpers (Badges, Stepper, Tooltip-ish) ---------- */
 
@@ -29,11 +29,7 @@ function Badge({
 }
 
 function StatusBadge({ status }: { status: "READY" | "BLOCKED" }) {
-  return (
-    <Badge tone={status === "READY" ? "success" : "error"}>
-      {status === "READY" ? "READY" : "BLOCKED"}
-    </Badge>
-  );
+  return <Badge tone={status === "READY" ? "success" : "error"}>{status}</Badge>;
 }
 
 function SeverityBadge({ severity }: { severity: "info" | "warn" | "error" }) {
@@ -41,14 +37,7 @@ function SeverityBadge({ severity }: { severity: "info" | "warn" | "error" }) {
   return <Badge tone={tone}>{severity.toUpperCase()}</Badge>;
 }
 
-function Tooltip({
-  label,
-  text,
-}: {
-  label: React.ReactNode;
-  text: string;
-}) {
-  // Simple native tooltip via title attribute (keeps deps minimal)
+function Tooltip({ label, text }: { label: React.ReactNode; text: string }) {
   return (
     <span title={text} className="underline decoration-dotted cursor-help">
       {label}
@@ -58,8 +47,6 @@ function Tooltip({
 
 const STEPS = ["Reader", "Checker", "Coder", "Submitter", "Reviewer"] as const;
 type StepName = (typeof STEPS)[number];
-
-/** Narration sequence used while the workflow runs (purely UX) */
 const NARRATION: Record<StepName, string> = {
   Reader: "🧾 Reading claim...",
   Checker: "✅ Checking for missing details...",
@@ -68,38 +55,31 @@ const NARRATION: Record<StepName, string> = {
   Reviewer: "🔍 Reviewing denial risk...",
 };
 
-type RunResult = any; // server validates; keep UI flexible
-
 export default function ClaimForm() {
   const [freeText, setFreeText] = useState<string>("");
   const [jsonText, setJsonText] = useState<string>("");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<RunResult | null>(null);
+  const [result, setResult] = useState<WorkflowResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // UI stepper state (visual only)
   const [activeStep, setActiveStep] = useState<number>(0);
   const [narration, setNarration] = useState<string>("");
 
-  // Derive outcome headline after a successful run
   const outcomeText = useMemo(() => {
     if (!result) return "";
-    const ready = result?.submission?.status === "READY";
-    const risk = result?.reviewer?.denialRisk;
-    const ts = result?.metrics?.timeSavedPercent ?? 0;
-    const ccr = result?.metrics?.cleanClaimRate ?? 0;
+    const ready = result.submission.status === "READY";
+    const risk = result.reviewer.denialRisk;
+    const ts = result.metrics.timeSavedPercent ?? 0;
+    const ccr = result.metrics.cleanClaimRate ?? 0;
     return ready
       ? `✅ Claim is READY. Denial risk: ${risk}. Time saved: ${ts}%. Clean-claim rate: ${ccr}%.`
       : `⚠️ Claim is BLOCKED. Denial risk: ${risk}. Fix issues, then re-run. Time saved: ${ts}%.`;
   }, [result]);
 
-  // Stepper advance “animation” while we wait for the API.
-  // This doesn’t reflect server internals; it’s user-friendly narration.
   useEffect(() => {
     if (!loading) return;
     setActiveStep(0);
     setNarration(NARRATION.Reader);
-
     const timers: NodeJS.Timeout[] = [];
     STEPS.forEach((_, idx) => {
       timers.push(
@@ -124,17 +104,15 @@ export default function ClaimForm() {
         body: JSON.stringify({ input: payload }),
       });
 
-      const text = await res.text(); // read once
-      if (!res.ok) {
-        // Show raw text if server returned HTML error page or message
-        throw new Error(text?.slice(0, 300) || "Run failed");
-      }
-      const data = JSON.parse(text);
+      const text = await res.text();
+      if (!res.ok) throw new Error(text?.slice(0, 300) || "Run failed");
+      const data: WorkflowResponse = JSON.parse(text);
       setResult(data);
       setNarration("✅ Completed.");
       setActiveStep(STEPS.length);
-    } catch (e: any) {
-      setError(e?.message ?? "Something went wrong.");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Something went wrong.";
+      setError(message);
       setNarration("❗ Error — see message below.");
     } finally {
       setLoading(false);
@@ -144,7 +122,7 @@ export default function ClaimForm() {
   const handleRun = () => {
     if (jsonText.trim()) {
       try {
-        const parsed = JSON.parse(jsonText);
+        const parsed = JSON.parse(jsonText) as unknown;
         return run(parsed);
       } catch {
         setError("Invalid JSON in the JSON input.");
@@ -237,7 +215,6 @@ Code: CPT 73721`}
           </div>
         )}
 
-        {/* Narration bar */}
         {loading || narration ? (
           <div className="rounded-2xl border p-3 text-sm text-gray-700">
             <span className="mr-2">🗣️</span>
@@ -281,13 +258,24 @@ Code: CPT 73721`}
 
         {result && (
           <div className="space-y-6">
-            {/* Outcome Summary (business impact) */}
+            {/* Outcome Summary */}
             <section className="rounded-2xl border bg-green-50 p-6 text-center">
               <h3 className="text-xl font-semibold">Outcome Summary</h3>
               <p className="mt-2 text-gray-700">{outcomeText}</p>
               <p className="mt-1 text-gray-500 text-sm">
                 Imagine scaling this to thousands of claims — that’s the power of agentic automation.
               </p>
+            </section>
+
+            {/* Executive Recap */}
+            <section className="rounded-2xl border p-4">
+              <h3 className="font-semibold">Executive Recap (Plain Language)</h3>
+              <p className="text-sm text-gray-600 mb-2">
+                A quick, non-technical summary of what the AI employee did, step by step.
+              </p>
+              <pre className="whitespace-pre-wrap rounded-xl bg-gray-50 p-3 text-sm leading-relaxed">
+                {result.explanation}
+              </pre>
             </section>
 
             {/* Impact Metrics */}
@@ -322,7 +310,7 @@ Code: CPT 73721`}
                 <p className="text-sm text-green-700">No issues found.</p>
               ) : (
                 <ul className="mt-2 space-y-2 text-sm">
-                  {result.verified.issues.map((i: any, idx: number) => (
+                  {result.verified.issues.map((i: VerificationIssue, idx: number) => (
                     <li key={idx} className="flex items-center gap-2">
                       <SeverityBadge severity={i.severity} />
                       <span>{i.message}</span>
@@ -383,7 +371,7 @@ Code: CPT 73721`}
                 A clear activity trail for reliability and auditing.
               </p>
               <ol className="mt-2 space-y-2 text-xs">
-                {result.logs.map((l: any, i: number) => (
+                {result.logs.map((l: AgentLog, i: number) => (
                   <li key={i} className="rounded-lg bg-gray-50 p-2">
                     <div className="flex items-center justify-between">
                       <span className="font-medium">
