@@ -1,4 +1,5 @@
-import { z } from "zod";
+
+import {z} from "zod";
 import {
   AgentLog,
   ClaimInput,
@@ -6,7 +7,7 @@ import {
   SubmissionDraft,
   SubmissionDraftSchema,
   VerificationIssue,
-} from "./schemas"
+} from "./schemas";
 import { askGeminiJSON } from "./gemini";
 
 // Minimal CPT “dictionary” for demo
@@ -65,7 +66,10 @@ ${typeof input === "string" ? input : JSON.stringify(input, null, 2)}
   return result;
 }
 
-export async function verifierAgent(claim: ClaimInput, logs: AgentLog[]): Promise<{ issues: VerificationIssue[]; normalized: ClaimInput; }> {
+export async function verifierAgent(
+  claim: ClaimInput,
+  logs: AgentLog[]
+): Promise<{ issues: VerificationIssue[]; normalized: ClaimInput }> {
   const issues: VerificationIssue[] = [];
 
   if (!claim.insuranceId || claim.insuranceId.trim() === "") {
@@ -109,12 +113,12 @@ export async function coderAgent(claim: ClaimInput, logs: AgentLog[]) {
 
   // If CPT exists, validate quickly
   if (claim.cptCode && CPT_REF[claim.cptCode]) {
-    valid = CPT_REF[claim.cptCode].procedures.some(p => proc.includes(p));
+    valid = CPT_REF[claim.cptCode].procedures.some((p) => proc.includes(p));
   }
 
   if (!valid) {
     // Find the closest by simple contains
-    const hit = Object.entries(CPT_REF).find(([_, v]) => v.procedures.some(p => proc.includes(p)));
+    const hit = Object.entries(CPT_REF).find(([_, v]) => v.procedures.some((p) => proc.includes(p)));
     suggested = hit?.[0] ?? null;
   } else {
     suggested = claim.cptCode!;
@@ -133,12 +137,22 @@ Return JSON: {"justification": string}
     if (typeof j.justification === "string") justification = j.justification;
   } catch {}
 
-  pushLog(logs, { agent: "CoderAgent", step: "code-validate", detail: "Validated/suggested CPT code.", data: { suggested, valid } });
+  pushLog(logs, {
+    agent: "CoderAgent",
+    step: "code-validate",
+    detail: "Validated/suggested CPT code.",
+    data: { suggested, valid },
+  });
   return { suggestedCpt: suggested, justification, valid };
 }
 
-export async function submissionAgent(claim: ClaimInput, issues: VerificationIssue[], suggestedCpt: string | null, logs: AgentLog[]): Promise<SubmissionDraft> {
-  const blocked = issues.some(i => i.severity === "error");
+export async function submissionAgent(
+  claim: ClaimInput,
+  issues: VerificationIssue[],
+  suggestedCpt: string | null,
+  logs: AgentLog[]
+): Promise<SubmissionDraft> {
+  const blocked = issues.some((i) => i.severity === "error");
   const draft: SubmissionDraft = {
     patient: claim.patientName,
     dob: claim.dob,
@@ -146,7 +160,7 @@ export async function submissionAgent(claim: ClaimInput, issues: VerificationIss
     procedure: claim.procedure,
     cptCode: suggestedCpt ?? claim.cptCode ?? null,
     status: blocked ? "BLOCKED" : "READY",
-    notes: issues.map(i => `${i.severity.toUpperCase()}: ${i.message}`),
+    notes: issues.map((i) => `${i.severity.toUpperCase()}: ${i.message}`),
   };
   const validated = SubmissionDraftSchema.parse(draft);
   pushLog(logs, { agent: "SubmissionAgent", step: "draft", detail: "Prepared submission draft.", data: validated });
@@ -155,9 +169,12 @@ export async function submissionAgent(claim: ClaimInput, issues: VerificationIss
 
 export async function reviewerAgent(submission: SubmissionDraft, logs: AgentLog[]) {
   // Simple denial risk heuristic + LLM rationale
-  const risk = submission.status === "BLOCKED"
-    ? "high"
-    : (!submission.insuranceId || !submission.cptCode) ? "medium" : "low";
+  const risk =
+    submission.status === "BLOCKED"
+      ? "high"
+      : !submission.insuranceId || !submission.cptCode
+      ? "medium"
+      : "low";
 
   const prompt = `
 Given this submission draft, estimate denial risk and explain briefly (max 2 sentences). No PHI.
@@ -172,7 +189,67 @@ Return JSON: {"rationale": string}
   } catch {}
 
   pushLog(logs, { agent: "ReviewerAgent", step: "review", detail: "Assessed denial risk.", data: { risk, rationale } });
-  return { denialRisk: risk as "low"|"medium"|"high", rationale };
+  return { denialRisk: risk as "low" | "medium" | "high", rationale };
+}
+
+/** ---------- Human-friendly explanation (new) ---------- */
+async function humanExplain({
+  parsed,
+  verifiedIssues,
+  suggestedCpt,
+  coderValid,
+  submission,
+  reviewer,
+  metrics,
+}: {
+  parsed: ClaimInput;
+  verifiedIssues: VerificationIssue[];
+  suggestedCpt: string | null;
+  coderValid: boolean;
+  submission: SubmissionDraft;
+  reviewer: { denialRisk: "low" | "medium" | "high"; rationale: string };
+  metrics: { timeSavedPercent: number; cleanClaimRate: number };
+}) {
+  // Compact, non-sensitive snapshot
+  const mini = {
+    patientName: parsed.patientName ? "Present" : "Missing",
+    dob: parsed.dob ? "Present" : "Missing",
+    insuranceId: submission.insuranceId ? "Present" : "Missing",
+    procedure: parsed.procedure || "Missing",
+    cpt: suggestedCpt || submission.cptCode || null,
+    issues: verifiedIssues.map((i) => `${i.severity}:${i.message}`).slice(0, 5),
+    status: submission.status,
+    denialRisk: reviewer.denialRisk,
+    timeSavedPercent: metrics.timeSavedPercent,
+    cleanClaimRate: metrics.cleanClaimRate,
+  };
+
+  const prompt = `
+Return ONLY JSON: { "text": string }.
+Write a concise, non-technical recap (5–7 short lines, emojis ok) of what the AI assistant did:
+Reader → Checker → Coder → Submitter → Reviewer.
+Use the outcomes below, be to-the-point, avoid jargon, under 120 words.
+
+Outcomes:
+${JSON.stringify(mini)}
+`.trim();
+
+  try {
+    const j = await askGeminiJSON(prompt);
+    if (j && typeof j.text === "string") return j.text.trim();
+  } catch {
+    // ignore and fall back
+  }
+
+  // Fallback if LLM hiccups
+  return [
+    "🧾 Read the claim and pulled out key fields.",
+    "✅ Checked for missing/incorrect details.",
+    `💬 Matched the procedure to a billing code (CPT: ${mini.cpt ?? "n/a"}).`,
+    `📤 Prepared a submission draft — status: ${mini.status}.`,
+    `🔍 Denial risk: ${mini.denialRisk}.`,
+    `⚡ Estimated time saved: ${mini.timeSavedPercent}% · Clean-claim rate: ${mini.cleanClaimRate}%.`,
+  ].join("\n");
 }
 
 // Orchestrator
@@ -196,6 +273,17 @@ export async function runWorkflow(input: unknown) {
   const timeSavedPercent = Math.round((1 - automatedSeconds / baselineSeconds) * 100);
   const cleanClaimRate = submission.status === "READY" ? 98 : 82;
 
+  // NEW: Generate human-readable explanation
+  const explanation = await humanExplain({
+    parsed,
+    verifiedIssues: verified.issues,
+    suggestedCpt: coder.suggestedCpt,
+    coderValid: coder.valid,
+    submission,
+    reviewer,
+    metrics: { timeSavedPercent, cleanClaimRate },
+  });
+
   return {
     parsed,
     verified,
@@ -209,5 +297,7 @@ export async function runWorkflow(input: unknown) {
       cleanClaimRate,
     },
     logs,
+    explanation, // <-- include the recap in API response
   };
 }
+

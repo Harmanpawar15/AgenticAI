@@ -63,6 +63,8 @@ export const WorkflowResponseSchema = z.object({
     cleanClaimRate: z.number(), // simulated KPI
   }),
   logs: z.array(AgentLogSchema),
+
+   explanation: z.string(), 
 });
 
 export type WorkflowResponse = z.infer<typeof WorkflowResponseSchema>;
